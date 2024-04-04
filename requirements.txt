@@ -11,4 +11,4 @@ scipy
 pandas
 scikit-learn
 timm
-olive-oil-ml
+git+https://github.com/mfinzi/olive-oil-ml
