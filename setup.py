@@ -37,5 +37,8 @@ setup(name='pactl',
       ]),
       python_requires='>=3.6, <3.10',
       install_requires=requirements,
+      dependency_links=[
+          'git+https://github.com/mfinzi/olive-oil-ml#egg=olive-oil-ml'
+      ],
       extras_require={}
      )
