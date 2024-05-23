@@ -165,6 +165,7 @@ def entrypoint(log_dir=None, **kwargs):
   log_dir = set_logging(log_dir=log_dir) if rank == 0 else None
   if rank == 0:
     logging.info(f'Working with {world_size} process(es).')
+     wandb.init(project="tight-pac-bayes", dir=log_dir)
 
   main(**kwargs, log_dir=log_dir, distributed=(world_size > 1), device_id=device_id)
 
