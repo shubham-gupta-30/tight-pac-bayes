@@ -3,7 +3,8 @@ from pathlib import Path
 from tqdm.auto import tqdm
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import numpy as np
+from torch.utils.data import DataLoader, Subset, Dataset
 from torch.optim import SGD, Adam, RMSprop, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data.distributed import DistributedSampler
@@ -39,13 +40,48 @@ def train(net, loader, criterion, optim, device=None, log_dir=None, epoch=None):
       metrics = { 'epoch': epoch, 'mini_loss': loss.detach().item() }
       logging.info(metrics, extra=dict(wandb=True, prefix='sgd/train'))
 
+from torch.optim.lr_scheduler import _LRScheduler
+
+class NoOpScheduler(_LRScheduler):
+    def __init__(self, optimizer):
+        super().__init__(optimizer)
+    
+    def get_lr(self):
+        return [group['lr'] for group in self.optimizer.param_groups]
+
+def select_random_subset(dataset, fraction):
+    """
+    Select a random fraction of the dataset.
+
+    Args:
+    - dataset (Dataset): The original dataset.
+    - fraction (float): Fraction of the dataset to select (0 < fraction <= 1).
+
+    Returns:
+    - Subset: A subset of the original dataset.
+    """
+    if fraction == 1.0:
+      return dataset
+    
+    # Calculate the number of samples to select
+    num_samples = int(len(dataset) * fraction)
+    
+    # Randomly select indices
+    all_indices = np.arange(len(dataset))
+    selected_indices = np.random.choice(all_indices, size=num_samples, replace=False)
+    
+    # Create a subset
+    subset = Subset(dataset, selected_indices)
+    subset.num_classes = dataset.num_classes
+    
+    return subset
 
 def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
          dataset=None, train_subset=1, indices_path=None, label_noise=0, num_workers=2,
          cfg_path=None, transfer=False, model_name='resnet18k', base_width=None,
          batch_size=128, optimizer='adam', lr=1e-3, momentum=.9, weight_decay=5e-4, epochs=0,
          intrinsic_dim=0, intrinsic_mode='filmrdkron',
-         warmup_epochs=0, warmup_lr=.1, decompress=False):
+         warmup_epochs=0, warmup_lr=.1, decompress=False, decompress_train_frac=1.0):
 
   random_seed_all(seed)
 
@@ -54,6 +90,9 @@ def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
           train_subset=train_subset,
           label_noise=label_noise,
           indices_path=indices_path)
+  
+  if decompress:
+    train_data = select_random_subset(train_data, decompress_train_frac)
 
   train_loader = DataLoader(train_data, batch_size=batch_size, num_workers=num_workers,
                             shuffle=not distributed,
@@ -91,7 +130,12 @@ def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
   elif optimizer == 'adam':
     optimizer = Adam(net.parameters(), lr=lr)
     # optim_scheduler = None
-    optim_scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
+    # if warmup_epochs > 0:
+    #     optim_scheduler = None  # Remove LambdaLR in favor of warmup scheduler
+    # else:
+    #     optim_scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
+    # optim_scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
+    optim_scheduler = NoOpScheduler(optimizer)
   elif optimizer == 'rmsprop':
     optimizer = RMSprop(net.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
     optim_scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
@@ -165,7 +209,7 @@ def entrypoint(log_dir=None, **kwargs):
   log_dir = set_logging(log_dir=log_dir) if rank == 0 else None
   if rank == 0:
     logging.info(f'Working with {world_size} process(es).')
-     wandb.init(project="tight-pac-bayes", dir=log_dir)
+    wandb.init(project="tight-pac-bayes", dir=log_dir)
 
   main(**kwargs, log_dir=log_dir, distributed=(world_size > 1), device_id=device_id)
 
