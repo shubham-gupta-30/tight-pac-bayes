@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import SGD, Adam, RMSprop, AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.utils.data.distributed import DistributedSampler
 
 
@@ -45,7 +45,7 @@ def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
          cfg_path=None, transfer=False, model_name='resnet18k', base_width=None,
          batch_size=128, optimizer='adam', lr=1e-3, momentum=.9, weight_decay=5e-4, epochs=0,
          intrinsic_dim=0, intrinsic_mode='filmrdkron',
-         warmup_epochs=0, warmup_lr=.1):
+         warmup_epochs=0, warmup_lr=.1, decompress=False):
 
   random_seed_all(seed)
 
@@ -62,8 +62,10 @@ def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
                            sampler=DistributedSampler(test_data) if distributed else None)
 
   net = create_model(model_name=model_name, num_classes=train_data.num_classes, in_chans=train_data[0][0].size(0), base_width=base_width,
-                     seed=seed, intrinsic_dim=intrinsic_dim, intrinsic_mode=intrinsic_mode,
-                     cfg_path=cfg_path, transfer=transfer, device_id=device_id, log_dir=log_dir)
+                    seed=seed, intrinsic_dim=intrinsic_dim, intrinsic_mode=intrinsic_mode,
+                    cfg_path=cfg_path, transfer=transfer, device_id=device_id, log_dir=log_dir, decompress=decompress)
+
+    
   if distributed:
     # net = nn.SyncBatchNorm.convert_sync_batchnorm(net)
     net = nn.parallel.DistributedDataParallel(net, device_ids=[device_id], broadcast_buffers=True)
@@ -88,7 +90,8 @@ def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
             epochs=(5, 75, epochs - 80))
   elif optimizer == 'adam':
     optimizer = Adam(net.parameters(), lr=lr)
-    optim_scheduler = None
+    # optim_scheduler = None
+    optim_scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: 1.0)
   elif optimizer == 'rmsprop':
     optimizer = RMSprop(net.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
     optim_scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
@@ -112,6 +115,16 @@ def main(seed=137, device_id=0, distributed=False, data_dir=None, log_dir=None,
       warm_epochs=[warmup_epochs], lr_goal=[warmup_lr], scheduler_after=[optim_scheduler])
 
   best_acc_so_far = 0.
+  
+  train_metrics = eval_model(net, train_loader, criterion, device_id=device_id, distributed=distributed)
+  test_metrics = eval_model(net, test_loader, criterion, device_id=device_id, distributed=distributed)
+
+  if log_dir is not None:
+    logging.info(train_metrics, extra=dict(wandb=True, prefix='sgd/train'))
+    logging.info(test_metrics, extra=dict(wandb=True, prefix='sgd/test'))
+    
+  logging.info(f"Epoch -1: {train_metrics['acc']:.4f} (Train) / {best_acc_so_far:.4f} (Test)")
+  
   for e in tqdm(range(epochs)):
     if distributed:
       train_loader.sampler.set_epoch(e)

@@ -41,6 +41,7 @@ def _setchainattr(obj, attr, value):
     setattr(obj, attributes[-1], value)
 
 
+
 def flatten(tensorList):
     flatList = []
     for t in tensorList:
@@ -151,6 +152,26 @@ class IDModule(nn.Module):
             p = init + proj_param.view(*init.shape)
             _setchainattr(self._forward_net[0], p_name, p)
         return self._forward_net[0](*args, **kwargs)
+    
+    def get_original_model(self, base_net):
+        flat_projected_params = self.P @ self.subspace_params
+        unflattened_params = unflatten_like(
+            flat_projected_params, self.trainable_initparams
+        )
+        iterables = zip(self.names, self.trainable_initparams, unflattened_params)
+        for key in self._forward_net[0].state_dict():
+            _setchainattr(base_net, key, self._forward_net[0].state_dict()[key])
+        for p_name, init, proj_param in iterables:
+            p = init + proj_param.view(*init.shape)
+            _setchainattr(base_net, p_name, torch.nn.Parameter(p))
+            
+        for module in base_net.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.track_running_stats = False
+                module.running_mean = None
+                module.running_var = None
+        return base_net
+    
 
 
 class RandomMultiply(torch.autograd.Function):

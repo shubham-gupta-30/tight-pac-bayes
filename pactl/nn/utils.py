@@ -5,12 +5,13 @@ import timm
 import torch
 
 from ..logging import wandb
-from .projectors import create_intrinsic_model
+from .projectors import create_intrinsic_model, unflatten_like, _setchainattr
+from copy import deepcopy
 
 
 def create_model(model_name=None, num_classes=None, base_width=None, in_chans=None,
                  seed=None, intrinsic_dim=0, intrinsic_mode='sparse',
-                 cfg_path=None, transfer=False, device_id=None, log_dir=None):
+                 cfg_path=None, transfer=False, device_id=None, log_dir=None, decompress=False):
 
   device = torch.device(f'cuda:{device_id}') if isinstance(device_id, int) else None
 
@@ -60,6 +61,7 @@ def create_model(model_name=None, num_classes=None, base_width=None, in_chans=No
     logging.info(f'Saved base model at "{Path(log_dir) / "init_model.pt"}".')
 
   ## Create intrinsic dimensionality model.
+  base_net_2 = deepcopy(base_net)
   final_net = base_net if intrinsic_cfg is None else \
               create_intrinsic_model(base_net, **intrinsic_cfg, ckpt_path=id_ckpt_path, device=device)
   final_net = final_net.to(device)
@@ -77,5 +79,38 @@ def create_model(model_name=None, num_classes=None, base_width=None, in_chans=No
 
     wandb.config.update({**net_cfg, **(intrinsic_cfg or dict()) })
     wandb.save('*.yml')
+    
+  if decompress:
+    final_net = copy_id_model_to_base_model(final_net, base_net_2)
 
   return final_net
+
+
+
+def copy_id_model_to_base_model(idmodel, base_model):
+    return idmodel.get_original_model(base_model)
+    flat_projected_params = idmodel.P @ idmodel.subspace_params
+    unflattened_params = unflatten_like(
+        flat_projected_params, idmodel.trainable_initparams
+    )
+    iterables = zip(idmodel.names, idmodel.trainable_initparams, unflattened_params)
+    i = 0
+    for p_name, init, proj_param in iterables:
+        print(p_name)
+        p = init + proj_param.view(*init.shape)
+        # if i < 2:
+        #   print(p, _getchainattr(idmodel._forward_net[0], p_name))
+        print(i, p_name)
+        i += 1
+        _setchainattr(base_model, p_name, torch.nn.Parameter(p))
+    return base_model
+  
+def copy_init_from_source_to_target(source, target):
+      aux = [(n, p) for n, p in source.named_parameters() if p.requires_grad]
+      target.names, target.trainable_initparams = zip(*aux)
+      target.trainable_initparams = [param for param in target.trainable_initparams]
+      target.names = list(target.names)
+      return target
+
+  
+    
